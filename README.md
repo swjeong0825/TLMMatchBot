@@ -6,6 +6,8 @@ A lightweight **FastAPI** service that accepts a free-text doubles match descrip
 
 ## Demo
 
+demo frontend: (https://summer-band-2e40.swjeong0825.workers.dev/)
+
 **Complete parse** — all four player names and the score were extracted; the confirmation form is pre-filled and ready to submit.
 
 ![Complete parse](./demo_images/image.png)
