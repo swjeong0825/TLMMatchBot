@@ -1,0 +1,253 @@
+openapi: "3.0.3"
+
+info:
+  title: Tennis League Chatbot — LLM Backend
+  description: |
+    Accepts a free-text chat message in which a player describes a doubles
+    match result, parses it with an LLM, and returns a structured draft for
+    the frontend confirmation step.
+
+    Flow:
+      1. Frontend sends the player's raw message + league_id to POST /parse-match.
+      2. LLM backend extracts the four nicknames and two scores; unresolved
+         slots are returned as null.
+      3. Frontend renders a confirmation form pre-filled with the draft and
+         highlights every slot listed in missing_fields for the player to fill.
+      4. Player reviews, fills any null slots, and confirms.
+      5. Frontend submits the completed values to
+         POST /leagues/{league_id}/matches on backend_main.
+
+    This service always returns HTTP 200 — a partial parse (some null slots)
+    is not an error; it is a signal to the frontend to ask the player to
+    complete the highlighted fields.
+  version: "2.0.0"
+
+servers:
+  - url: http://localhost:8001
+    description: Local development
+
+paths:
+  /parse-match:
+    post:
+      summary: Convert a natural-language match description into a (possibly partial) draft
+      description: |
+        Parses the player's free-text message and **always** returns HTTP 200
+        with a ParseMatchResponse.
+
+        - **`missing_fields` is empty** — all four slots resolved; the frontend
+          shows the confirmation form and the player can submit to backend_main.
+        - **`missing_fields` is non-empty** — one or more slots are `null`; the
+          frontend highlights those fields so the player can fill them in before
+          confirming.
+
+        The `hint` string (when present) is the chatbot reply to display
+        alongside the partial form, prompting the player to fill the gaps.
+      operationId: parseMatchResult
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ParseMatchRequest"
+            examples:
+              complete:
+                summary: Message with all four players and a score
+                value:
+                  league_id: "550e8400-e29b-41d4-a716-446655440000"
+                  message: "Alice and Bob beat Charlie and Dave 6-3"
+              partial_names:
+                summary: Only three players mentioned — one slot will be null
+                value:
+                  league_id: "550e8400-e29b-41d4-a716-446655440000"
+                  message: "Alice and Bob beat Charlie 6-3"
+              no_score:
+                summary: Four players but no score — score slots will be null
+                value:
+                  league_id: "550e8400-e29b-41d4-a716-446655440000"
+                  message: "Alice and Bob beat Charlie and Dave"
+      responses:
+        "200":
+          description: |
+            Always returned.  Inspect `missing_fields` to determine whether the
+            draft is complete or partial.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParseMatchResponse"
+              examples:
+                fully_resolved:
+                  summary: All slots extracted — ready to confirm
+                  value:
+                    league_id: "550e8400-e29b-41d4-a716-446655440000"
+                    raw_message: "Alice and Bob beat Charlie and Dave 6-3"
+                    draft:
+                      team1_nicknames: ["Alice", "Bob"]
+                      team2_nicknames: ["Charlie", "Dave"]
+                      team1_score: "6"
+                      team2_score: "3"
+                    missing_fields: []
+                    hint: null
+                partial_player:
+                  summary: One player slot missing — frontend highlights team2_nicknames[1]
+                  value:
+                    league_id: "550e8400-e29b-41d4-a716-446655440000"
+                    raw_message: "Alice and Bob beat Charlie 6-3"
+                    draft:
+                      team1_nicknames: ["Alice", "Bob"]
+                      team2_nicknames: ["Charlie", null]
+                      team1_score: "6"
+                      team2_score: "3"
+                    missing_fields: ["team2_nicknames[1]"]
+                    hint: "I couldn't extract team 2 player 1 from your message. Please fill in the highlighted fields below."
+                no_score:
+                  summary: Score missing — frontend highlights both score fields
+                  value:
+                    league_id: "550e8400-e29b-41d4-a716-446655440000"
+                    raw_message: "Alice and Bob beat Charlie and Dave"
+                    draft:
+                      team1_nicknames: ["Alice", "Bob"]
+                      team2_nicknames: ["Charlie", "Dave"]
+                      team1_score: null
+                      team2_score: null
+                    missing_fields: ["team1_score", "team2_score"]
+                    hint: "I couldn't extract team 1 score, team 2 score from your message. Please fill in the highlighted fields below."
+
+components:
+  schemas:
+
+    # -----------------------------------------------------------------------
+    # Request
+    # -----------------------------------------------------------------------
+
+    ParseMatchRequest:
+      type: object
+      required:
+        - league_id
+        - message
+      properties:
+        league_id:
+          type: string
+          format: uuid
+          description: |
+            The league this match belongs to. Passed through to the response
+            so the frontend can submit to the correct backend_main endpoint.
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        message:
+          type: string
+          minLength: 1
+          description: |
+            Free-text match description entered by the player.
+            Examples:
+              - "Alice and Bob beat Charlie and Dave 6-3"
+              - "We lost to Kim and Lee, 4-6"
+          example: "Alice and Bob beat Charlie and Dave 6-3"
+
+    # -----------------------------------------------------------------------
+    # Partial draft — individual slots may be null
+    #
+    # Relation to backend_main's SubmitMatchResultRequest:
+    #   POST /leagues/{league_id}/matches expects:
+    #     {
+    #       "team1_nicknames": ["str", "str"],   <- no nulls
+    #       "team2_nicknames": ["str", "str"],   <- no nulls
+    #       "team1_score":     "str",            <- non-negative integer string
+    #       "team2_score":     "str"             <- non-negative integer string
+    #     }
+    #
+    # The frontend must ensure all null slots are filled by the player before
+    # forwarding the confirmed draft to backend_main.
+    # -----------------------------------------------------------------------
+
+    PartialMatchDraft:
+      description: |
+        Draft with exactly 2 slots per team. A null slot means the provider
+        could not confidently extract that value from the player's message.
+        The frontend renders null slots as empty, highlighted input boxes.
+      type: object
+      required:
+        - team1_nicknames
+        - team2_nicknames
+      properties:
+        team1_nicknames:
+          type: array
+          items:
+            type: string
+            nullable: true
+          minItems: 2
+          maxItems: 2
+          description: |
+            Exactly 2 slots for team 1. null = player not extracted.
+          example: ["Alice", "Bob"]
+        team2_nicknames:
+          type: array
+          items:
+            type: string
+            nullable: true
+          minItems: 2
+          maxItems: 2
+          description: |
+            Exactly 2 slots for team 2. null = player not extracted.
+          example: ["Charlie", null]
+        team1_score:
+          type: string
+          nullable: true
+          description: |
+            Score for team 1 as a non-negative integer string, or null if
+            not extracted. backend_main validates the integer constraint.
+          example: "6"
+        team2_score:
+          type: string
+          nullable: true
+          description: |
+            Score for team 2 as a non-negative integer string, or null if
+            not extracted.
+          example: "3"
+
+    # -----------------------------------------------------------------------
+    # Response — always HTTP 200
+    # -----------------------------------------------------------------------
+
+    ParseMatchResponse:
+      type: object
+      required:
+        - league_id
+        - raw_message
+        - draft
+        - missing_fields
+      properties:
+        league_id:
+          type: string
+          format: uuid
+          description: |
+            Echoed from the request. The frontend uses this to build the
+            backend_main URL: POST /leagues/{league_id}/matches.
+        raw_message:
+          type: string
+          description: |
+            The original player message, echoed back so the chat UI can
+            display "I heard: …" alongside the confirmation form.
+        draft:
+          $ref: "#/components/schemas/PartialMatchDraft"
+        missing_fields:
+          type: array
+          items:
+            type: string
+            enum:
+              - "team1_nicknames[0]"
+              - "team1_nicknames[1]"
+              - "team2_nicknames[0]"
+              - "team2_nicknames[1]"
+              - "team1_score"
+              - "team2_score"
+          description: |
+            Slot-level identifiers for every null value in the draft.
+            Empty array → fully resolved; forward to backend_main after confirm.
+            Non-empty → highlight these fields and wait for the player to fill them.
+          example: ["team2_nicknames[1]", "team1_score", "team2_score"]
+        hint:
+          type: string
+          nullable: true
+          description: |
+            Optional chatbot reply shown to the player when missing_fields is
+            non-empty. Null when the parse is fully resolved.
+          example: "I couldn't extract team 2 player 1 from your message. Please fill in the highlighted fields below."
